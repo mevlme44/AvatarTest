@@ -5,12 +5,12 @@ import sys
 import os
 import numpy as np
 import torch
-from src.modules.vad import VAD
-from src.modules.stt import STT
-from src.modules.llm import LLM
-from src.modules.tts import StreamTTS
-from src.modules.avatar import Avatar
-from src.utils.audio import AudioRecorder
+from app.modules.vad import VAD
+from app.modules.stt import STT
+from app.modules.llm import LLM
+from app.modules.tts import StreamTTS
+from app.modules.avatar import Avatar
+from app.utils.audio import AudioRecorder
 
 class Kiosk:
     def __init__(self):

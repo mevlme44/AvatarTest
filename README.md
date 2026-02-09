@@ -40,7 +40,7 @@ python run.py
 
 ## Configuration
 
-- Edit `src/main.py` to change model paths or device settings.
+- Edit `app/main.py` to change model paths or device settings.
 - Place avatar video loops in `assets/`:
   - `idle_loop.mp4`
   - `talking_loop.mp4` (optional)
