@@ -1,3 +1,4 @@
+import torch
 import os
 import time
 from faster_whisper import WhisperModel
@@ -7,13 +8,32 @@ class STT:
         self.device = device
         self.compute_type = compute_type
         
+        # Determine optimal compute type for current device
+        if device == "cpu" or not torch.cuda.is_available():
+            self.compute_type = "int8"
+            self.device = "cpu"
+            print("Running on CPU, switching compute_type to 'int8'...")
+        elif compute_type == "float16": 
+             pass # Try float16 first if requested on GPU 
+             
         # Load model from local path if provided, otherwise download from HF automatically
-        if model_path and os.path.exists(model_path):
-            print(f"Loading STT model from local path: {model_path}")
-            self.model = WhisperModel(model_path, device=device, compute_type=compute_type)
-        else:
-            print(f"Loading STT model '{model_size}' (downloading if needed)...")
-            self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        try:
+            if model_path and os.path.exists(model_path):
+                print(f"Loading STT model from local path: {model_path}")
+                self.model = WhisperModel(model_path, device=self.device, compute_type=self.compute_type)
+            else:
+                print(f"Loading STT model '{model_size}' (downloading if needed)...")
+                self.model = WhisperModel(model_size, device=self.device, compute_type=self.compute_type)
+        except ValueError as e:
+            if "requested compute type" in str(e).lower() or "not supported" in str(e).lower():
+                print(f"Compute type '{self.compute_type}' not supported on this device. Retrying with 'int8'...")
+                self.compute_type = "int8"
+                if model_path and os.path.exists(model_path):
+                     self.model = WhisperModel(model_path, device=self.device, compute_type=self.compute_type)
+                else:
+                     self.model = WhisperModel(model_size, device=self.device, compute_type=self.compute_type)
+            else:
+                raise e
 
     def transcribe(self, audio_data, language="ru"):
         """
