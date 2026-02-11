@@ -12,7 +12,8 @@ class AudioRecorder:
         
         self.is_recording = False
         self.is_paused = False
-        self.audio_queue = queue.Queue()
+        # Keep queue bounded so callback never grows memory unbounded.
+        self.audio_queue = queue.Queue(maxsize=256)
         self.speech_buffer = []
         
         # Audio input device index (default system input)
@@ -20,6 +21,7 @@ class AudioRecorder:
         
         self.vad = None # VAD instance
         self.stream = None
+        self.overflow_warnings = 0
         
     def set_vad(self, vad_instance):
         self.vad = vad_instance
@@ -33,8 +35,30 @@ class AudioRecorder:
         
         def audio_callback(indata, frames, time, status):
             if status:
-                print(status)
-            self.audio_queue.put(indata.copy())
+                if status.input_overflow:
+                    self.overflow_warnings += 1
+                    if self.overflow_warnings % 20 == 1:
+                        print("Warning: audio input overflow detected; dropping old chunks.")
+                else:
+                    print(status)
+
+            # Drop input while paused (muted/system speaking) to avoid stale backlog.
+            if self.is_paused:
+                return
+
+            try:
+                self.audio_queue.put_nowait(indata.copy())
+            except queue.Full:
+                # Drop oldest chunk and keep newest one to limit latency.
+                try:
+                    self.audio_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self.audio_queue.put_nowait(indata.copy())
+                except queue.Full:
+                    # If callback is still behind, just skip this chunk.
+                    pass
             
         self.stream = sd.InputStream(samplerate=self.sample_rate, 
                                      blocksize=self.chunk_size, 

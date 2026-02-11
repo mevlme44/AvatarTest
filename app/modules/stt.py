@@ -35,7 +35,7 @@ class STT:
             else:
                 raise e
 
-    def transcribe(self, audio_data, language="ru"):
+    def transcribe(self, audio_data, language="ru", beam_size=1):
         """
         Transcribe audio data (numpy array or file path)
         Returns:
@@ -44,7 +44,7 @@ class STT:
             info (dict): Transcription info
         """
         start_time = time.time()
-        segments, info = self.model.transcribe(audio_data, language=language, beam_size=5)
+        segments, info = self.model.transcribe(audio_data, language=language, beam_size=beam_size)
         
         full_text = ""
         seg_list = []

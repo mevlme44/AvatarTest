@@ -8,7 +8,7 @@ class VAD:
         # Load model using torch.hub
         self.model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
                                            model=model_name,
-                                           force_reload=True,
+                                           force_reload=False,
                                            trust_repo=True)
         (self.get_speech_timestamps,
          self.save_audio,

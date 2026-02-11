@@ -7,7 +7,7 @@ import queue
 import re
 
 class TTS:
-    def __init__(self, model_id='v3_1_ru', device='cpu', sample_rate=48000):
+    def __init__(self, model_id='v3_1_ru', device='cuda', sample_rate=48000):
         self.device = torch.device(device)
         self.sample_rate = sample_rate
         self.model_id = model_id
@@ -31,12 +31,23 @@ class TTS:
         start_time = time.time()
         if not text.strip():
             return torch.zeros(1), self.sample_rate
+
+        # Silero TTS limitation: max 930 characters?
+        # Actually input overflow usually means text is too long for model buffer
+        # Let's truncate or split if needed, but here simple truncation for safety
+        if len(text) > 800:
+            print(f"Warning: TTS text too long ({len(text)}), truncating to 800 chars.")
+            text = text[:800]
             
-        audio = self.model.apply_tts(text=text,
-                                     speaker=speaker,
-                                     sample_rate=self.sample_rate,
-                                     put_accent=put_accent,
-                                     put_yo=put_yo)
+        try:
+            audio = self.model.apply_tts(text=text,
+                                        speaker=speaker,
+                                        sample_rate=self.sample_rate,
+                                        put_accent=put_accent,
+                                        put_yo=put_yo)
+        except ValueError as e:
+            print(f"TTS Error: {e}")
+            return torch.zeros(1), self.sample_rate
         
         elapsed = time.time() - start_time
         return audio, self.sample_rate
@@ -60,41 +71,97 @@ class StreamTTS(TTS):
         self.on_start_talking = None
         self.on_stop_talking = None
 
-    def set_callbacks(self, on_start, on_stop):
+    def set_callbacks(self, on_start=None, on_stop=None, on_audio_chunk=None):
         self.on_start_talking = on_start
         self.on_stop_talking = on_stop
+        self.on_audio_chunk = on_audio_chunk
 
     def process_stream(self, text_stream):
         """
         Process a stream of text chunks.
         """
-        for chunk in text_stream:
-            self.buffer += chunk
-            # Check for sentence end (simple heuristic)
-            if any(punct in chunk for punct in ['.', '!', '?', '\n']):
-                # Find the last punctuation index to split safely
-                # This is a simplification; robust sentence splitting is harder
-                if self.buffer.endswith('.') or self.buffer.endswith('!') or self.buffer.endswith('?'):
-                    to_synthesize = self.buffer
-                    self.buffer = ""
-                    self._synthesize_and_queue(to_synthesize)
-        
-        # Process remaining buffer
-        if self.buffer:
-            self._synthesize_and_queue(self.buffer)
-            self.buffer = ""
+        started = False
+        try:
+            for chunk in text_stream:
+                if not started:
+                    started = True
+                    if self.on_start_talking:
+                        self.on_start_talking()
+
+                self.buffer += chunk
+                
+                # Force flush if buffer gets too long (prevent model input overflow)
+                if len(self.buffer) > 250:
+                     # Find nearest space to split safely if possible
+                     last_space = self.buffer.rfind(' ')
+                     if last_space > 0:
+                         to_synthesize = self.buffer[:last_space]
+                         self.buffer = self.buffer[last_space+1:]
+                         self._synthesize_and_queue(to_synthesize)
+                     else:
+                         # No space, just flush all
+                         self._synthesize_and_queue(self.buffer)
+                         self.buffer = ""
+                     continue
+
+                # Check if there is any sentence terminator in the buffer
+                if re.search(r'[.!?\n]', self.buffer):
+                    # Split buffer into sentences, keeping delimiters
+                    parts = re.split(r'([.!?\n]+)', self.buffer)
+                    
+                    # Reconstruct completed sentences
+                    sentences = []
+                    for i in range(0, len(parts) - 1, 2):
+                        text_part = parts[i]
+                        delim_part = parts[i+1]
+                        full_sent = text_part + delim_part
+                        sentences.append(full_sent)
+                    
+                    # The last part is an incomplete remainder
+                    remainder = parts[-1]
+                    
+                    for sent in sentences:
+                        if sent.strip():
+                            self._synthesize_and_queue(sent)
+                    
+                    self.buffer = remainder
             
-        # Wait for queue to empty if we want to block until done
-        # But main loop needs to continue? No, main loop should wait for audio to finish before listening again?
-        # Usually yes, to avoid self-listening.
-        while not self.audio_queue.empty() or self.is_playing:
-            time.sleep(0.1)
+            # Process remaining buffer
+            if self.buffer and self.buffer.strip():
+                self._synthesize_and_queue(self.buffer)
+                self.buffer = ""
+                
+            # Block until all queued audio was played to avoid recorder resume race.
+            while not self.audio_queue.empty() or self.is_playing:
+                time.sleep(0.05)
+        finally:
+            if started and self.on_stop_talking:
+                self.on_stop_talking()
 
     def _synthesize_and_queue(self, text):
-        if not text.strip():
+        text = text.strip()
+        if not text:
             return
+        
+        # Check if text contains at least one alphanumeric character
+        # Silero might fail on just punctuation
+        if not any(c.isalnum() for c in text):
+            return
+
         # print(f"Synthesizing: {text}")
         audio, sr = self.generate(text)
+        
+        # Check if audio is valid and has significant duration
+        # If audio is too short (e.g. < 0.1s), MuseTalk might crash
+        if isinstance(audio, torch.Tensor):
+            if audio.numel() < 1600: # < 0.1s at 16k (assuming resampled later) or 48k? 
+                # TTS returns 48k usually. 48000 * 0.1 = 4800 samples.
+                # If zero or very short, skip
+                if audio.numel() == 0:
+                    return
+            else:
+                pass # valid
+        
         self.audio_queue.put((audio, sr))
 
     def _play_loop(self):
@@ -103,19 +170,15 @@ class StreamTTS(TTS):
                 audio, sr = self.audio_queue.get(timeout=0.1)
                 
                 self.is_playing = True
-                if self.on_start_talking:
-                    self.on_start_talking()
-                    
-                self.play(audio, sr)
+
+                if self.on_audio_chunk:
+                    # Pass audio to external handler (e.g., Avatar)
+                    self.on_audio_chunk(audio, sr)
+                else:
+                    # Default playback
+                    self.play(audio, sr)
                 
                 self.is_playing = False
-                # Check if queue is empty to trigger stop callback potentially?
-                # Ideally we only stop talking when queue is empty AND current playback finished.
-                # Here we toggle per sentence which might be jerky for avatar.
-                # Better: check queue size.
-                if self.audio_queue.empty():
-                     if self.on_stop_talking:
-                         self.on_stop_talking()
                          
             except queue.Empty:
                 continue
